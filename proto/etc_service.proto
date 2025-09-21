@@ -1,0 +1,219 @@
+syntax = "proto3";
+
+package etc_meisai.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto;etc_meisaiv1";
+
+// ETC明細 gRPC service definition
+service ETCService {
+  // Basic CRUD operations
+  rpc CreateETCMeisai(CreateETCMeisaiRequest) returns (ETCMeisaiResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/etc/meisai"
+      body: "*"
+    };
+  };
+  rpc GetETCMeisai(GetETCMeisaiRequest) returns (ETCMeisaiResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/etc/meisai/{id}"
+    };
+  };
+  rpc UpdateETCMeisai(UpdateETCMeisaiRequest) returns (ETCMeisaiResponse) {
+    option (google.api.http) = {
+      put: "/api/v1/etc/meisai/{id}"
+      body: "etc_meisai"
+    };
+  };
+  rpc DeleteETCMeisai(DeleteETCMeisaiRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      delete: "/api/v1/etc/meisai/{id}"
+    };
+  };
+  rpc ListETCMeisai(ListETCMeisaiRequest) returns (ListETCMeisaiResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/etc/meisai"
+    };
+  };
+
+  // Bulk operations
+  rpc BulkCreateETCMeisai(BulkCreateETCMeisaiRequest) returns (BulkCreateETCMeisaiResponse);
+  rpc BulkUpdateETCMeisai(BulkUpdateETCMeisaiRequest) returns (BulkUpdateETCMeisaiResponse);
+
+  // Advanced query operations
+  rpc GetETCMeisaiByDateRange(GetETCMeisaiByDateRangeRequest) returns (ListETCMeisaiResponse);
+  rpc GetETCMeisaiByHash(GetETCMeisaiByHashRequest) returns (ETCMeisaiResponse);
+  rpc GetUnmappedETCMeisai(GetUnmappedETCMeisaiRequest) returns (ListETCMeisaiResponse);
+
+  // Utility operations
+  rpc CheckDuplicatesByHash(CheckDuplicatesByHashRequest) returns (CheckDuplicatesResponse);
+  rpc GenerateHash(GenerateHashRequest) returns (GenerateHashResponse);
+
+  // Summary and statistics
+  rpc GetETCSummary(GetETCSummaryRequest) returns (GetETCSummaryResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/etc/summary"
+    };
+  };
+  rpc GetMonthlyStats(GetMonthlyStatsRequest) returns (GetMonthlyStatsResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/etc/stats/monthly"
+    };
+  };
+}
+
+// ETCMeisai core message
+message ETCMeisai {
+  int64 id = 1;
+  string hash = 2;
+  string date = 3;
+  string time = 4;
+  string car_type = 5;
+  string car_number = 6;
+  string entrance_ic = 7;
+  string exit_ic = 8;
+  int32 distance = 9;
+  int32 toll_amount = 10;
+  int32 discount_amount = 11;
+  int32 final_amount = 12;
+  string payment_method = 13;
+  string card_number = 14;
+  string user_id = 15;
+  google.protobuf.Timestamp created_at = 16;
+  google.protobuf.Timestamp updated_at = 17;
+}
+
+// Request messages
+message CreateETCMeisaiRequest {
+  ETCMeisai etc_meisai = 1;
+}
+
+message GetETCMeisaiRequest {
+  int64 id = 1;
+}
+
+message UpdateETCMeisaiRequest {
+  int64 id = 1;
+  ETCMeisai etc_meisai = 2;
+}
+
+message DeleteETCMeisaiRequest {
+  int64 id = 1;
+}
+
+message ListETCMeisaiRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  string filter = 3;
+}
+
+message BulkCreateETCMeisaiRequest {
+  repeated ETCMeisai etc_meisai_list = 1;
+}
+
+message BulkUpdateETCMeisaiRequest {
+  repeated ETCMeisai etc_meisai_list = 1;
+}
+
+message GetETCMeisaiByDateRangeRequest {
+  string start_date = 1;
+  string end_date = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message GetETCMeisaiByHashRequest {
+  string hash = 1;
+}
+
+message GetUnmappedETCMeisaiRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message CheckDuplicatesByHashRequest {
+  repeated string hashes = 1;
+}
+
+message GenerateHashRequest {
+  ETCMeisai etc_meisai = 1;
+}
+
+message GetETCSummaryRequest {
+  string start_date = 1;
+  string end_date = 2;
+  string user_id = 3;
+}
+
+message GetMonthlyStatsRequest {
+  int32 year = 1;
+  int32 month = 2;
+  string user_id = 3;
+}
+
+// Response messages
+message ETCMeisaiResponse {
+  ETCMeisai etc_meisai = 1;
+}
+
+message ListETCMeisaiResponse {
+  repeated ETCMeisai etc_meisai_list = 1;
+  string next_page_token = 2;
+  int32 total_count = 3;
+}
+
+message BulkCreateETCMeisaiResponse {
+  repeated ETCMeisai created_etc_meisai_list = 1;
+  int32 success_count = 2;
+  int32 error_count = 3;
+  repeated string error_messages = 4;
+}
+
+message BulkUpdateETCMeisaiResponse {
+  repeated ETCMeisai updated_etc_meisai_list = 1;
+  int32 success_count = 2;
+  int32 error_count = 3;
+  repeated string error_messages = 4;
+}
+
+message CheckDuplicatesResponse {
+  repeated string duplicate_hashes = 1;
+  int32 duplicate_count = 2;
+}
+
+message GenerateHashResponse {
+  string hash = 1;
+}
+
+message GetETCSummaryResponse {
+  int32 total_transactions = 1;
+  int64 total_amount = 2;
+  int64 total_toll = 3;
+  int64 total_discount = 4;
+  repeated ETCMonthlySummary monthly_summaries = 5;
+}
+
+message GetMonthlyStatsResponse {
+  int32 year = 1;
+  int32 month = 2;
+  int32 transaction_count = 3;
+  int64 total_amount = 4;
+  int64 average_amount = 5;
+  repeated ETCDailyStat daily_stats = 6;
+}
+
+message ETCMonthlySummary {
+  int32 year = 1;
+  int32 month = 2;
+  int32 transaction_count = 3;
+  int64 total_amount = 4;
+}
+
+message ETCDailyStat {
+  int32 day = 1;
+  int32 transaction_count = 2;
+  int64 total_amount = 3;
+}

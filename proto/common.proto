@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package common.v1;
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto/common/v1;commonv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Empty represents an empty message
+message Empty {}
+
+// StatusResponse represents a generic status response
+message StatusResponse {
+  bool success = 1;
+  string message = 2;
+  string code = 3;
+}
+
+// PageInfo represents pagination information
+message PageInfo {
+  int32 page_size = 1;
+  string page_token = 2;
+  int32 total_count = 3;
+  bool has_more = 4;
+}
+
+// ErrorDetail represents detailed error information
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+  map<string, string> metadata = 3;
+}

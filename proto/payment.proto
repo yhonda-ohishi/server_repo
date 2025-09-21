@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package etc_meisai.v1;
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto/payment/v1;paymentv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// Payment represents a payment record
+message Payment {
+  string id = 1;
+  string user_id = 2;
+  repeated string transaction_ids = 3;
+  int64 total_amount = 4;
+  PaymentMethod payment_method = 5;
+  google.protobuf.Timestamp payment_date = 6;
+  PaymentProcessingStatus status = 7;
+  string reference_number = 8;
+}
+
+enum PaymentMethod {
+  PAYMENT_METHOD_UNSPECIFIED = 0;
+  PAYMENT_METHOD_CREDIT_CARD = 1;
+  PAYMENT_METHOD_BANK_TRANSFER = 2;
+  PAYMENT_METHOD_AUTO_DEBIT = 3;
+}
+
+enum PaymentProcessingStatus {
+  PAYMENT_PROCESSING_STATUS_UNSPECIFIED = 0;
+  PAYMENT_PROCESSING_STATUS_PENDING = 1;
+  PAYMENT_PROCESSING_STATUS_PROCESSING = 2;
+  PAYMENT_PROCESSING_STATUS_COMPLETED = 3;
+  PAYMENT_PROCESSING_STATUS_FAILED = 4;
+}
+
+// MonthlyStatement represents monthly billing statement
+message MonthlyStatement {
+  string id = 1;
+  string user_id = 2;
+  string card_id = 3;
+  int32 year = 4;
+  int32 month = 5;
+  int32 total_trips = 6;
+  double total_distance = 7;
+  int64 total_amount = 8;
+  int64 discount_amount = 9;
+  int64 final_amount = 10;
+  google.protobuf.Timestamp generated_at = 11;
+  google.protobuf.Timestamp payment_due_date = 12;
+}
+
+// Request messages
+message GetPaymentRequest {
+  string id = 1;
+}
+
+message CreatePaymentRequest {
+  string user_id = 1;
+  repeated string transaction_ids = 2;
+  int64 total_amount = 3;
+  PaymentMethod payment_method = 4;
+}
+
+message GetMonthlyStatementRequest {
+  string user_id = 1;
+  int32 year = 2;
+  int32 month = 3;
+}
+
+message ListPaymentsRequest {
+  string user_id = 1;
+  PaymentProcessingStatus status = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListPaymentsResponse {
+  repeated Payment payments = 1;
+  string next_page_token = 2;
+}
+
+// PaymentService provides payment operations
+service PaymentService {
+  // Get a payment by ID
+  rpc GetPayment(GetPaymentRequest) returns (Payment) {
+    option (google.api.http) = {
+      get: "/api/v1/payments/{id}"
+    };
+  }
+
+  // Create a new payment
+  rpc CreatePayment(CreatePaymentRequest) returns (Payment) {
+    option (google.api.http) = {
+      post: "/api/v1/payments"
+      body: "*"
+    };
+  }
+
+  // List payments for a user
+  rpc ListPayments(ListPaymentsRequest) returns (ListPaymentsResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/payments"
+    };
+  }
+
+  // Get monthly statement
+  rpc GetMonthlyStatement(GetMonthlyStatementRequest) returns (MonthlyStatement) {
+    option (google.api.http) = {
+      get: "/api/v1/statements/{user_id}/{year}/{month}"
+    };
+  }
+}

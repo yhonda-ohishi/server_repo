@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+docs/
+specs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Test files
+tests/
+*_test.go
+coverage.out
+
+# Development
+.env
+.env.local
+.env.development
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Node modules (if any)
+node_modules/
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Monitoring (included via compose volumes)
+monitoring/
+nginx/
+
+# Data directories
+data/
+logs/

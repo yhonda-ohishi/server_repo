@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(go mod:*)",
+      "Bash(go build:*)",
+      "Bash(go get:*)",
+      "Bash(go test:*)",
+      "Bash(powershell:*)",
+      "Bash(go install:*)",
+      "Bash(chmod:*)",
+      "Bash(bash:*)",
+      "Bash(go tool cover:*)",
+      "Bash(awk:*)",
+      "Bash(sort:*)",
+      "Bash(for pkg in auth cache circuit pool registry)",
+      "Bash(do echo -n \"$pkg: \")",
+      "Bash(done)",
+      "Bash(find:*)",
+      "Bash(buf generate:*)",
+      "Bash(curl:*)",
+      "Bash(protoc:*)",
+      "Read(//c/go/db_service/src/service/**)",
+      "Read(//c/go/db_service/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,332 @@
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/yhonda-ohishi/db-handler-server/internal/client"
+	"github.com/yhonda-ohishi/db-handler-server/internal/config"
+	pb "github.com/yhonda-ohishi/db-handler-server/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+)
+
+// RestHandler handles REST API requests using grpc-gateway
+type RestHandler struct {
+	config         *config.Config
+	serviceManager *client.ServiceManager
+	mux            *runtime.ServeMux
+}
+
+// NewRestHandler creates a new REST handler
+func NewRestHandler(cfg *config.Config, serviceManager *client.ServiceManager) (*RestHandler, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if serviceManager == nil {
+		return nil, fmt.Errorf("service manager cannot be nil")
+	}
+
+	// Create grpc-gateway mux with custom options
+	mux := runtime.NewServeMux(
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.JSONPb{}),
+		runtime.WithMetadata(metadataAnnotator),
+		runtime.WithErrorHandler(customGatewayErrorHandler),
+		runtime.WithForwardResponseOption(forwardResponseOption),
+		runtime.WithIncomingHeaderMatcher(incomingHeaderMatcher),
+		runtime.WithOutgoingHeaderMatcher(outgoingHeaderMatcher),
+	)
+
+	handler := &RestHandler{
+		config:         cfg,
+		serviceManager: serviceManager,
+		mux:           mux,
+	}
+
+	// Register all services
+	if err := handler.registerServices(); err != nil {
+		return nil, fmt.Errorf("failed to register services: %w", err)
+	}
+
+	return handler, nil
+}
+
+// registerServices registers all gRPC services with the gateway
+func (h *RestHandler) registerServices() error {
+	ctx := context.Background()
+
+	if h.config.IsSingleMode() {
+		// In single mode, use in-memory connections
+		return h.registerServicesInMemory(ctx)
+	}
+
+	// In separate mode, use network connections to external services
+	return h.registerServicesNetwork(ctx)
+}
+
+// registerServicesInMemory registers services using in-memory connections (single mode)
+func (h *RestHandler) registerServicesInMemory(ctx context.Context) error {
+	// Get bufconn manager for in-memory connections
+	factory := client.NewFactory(h.config)
+	bufconnManager := factory.GetBufconnManager()
+
+	// Register User Service
+	userConn, err := bufconnManager.CreateClient("user").GetConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create user service connection: %w", err)
+	}
+	if err := pb.RegisterUserServiceHandler(ctx, h.mux, userConn); err != nil {
+		return fmt.Errorf("failed to register user service: %w", err)
+	}
+
+	// Register Transaction Service
+	transactionConn, err := bufconnManager.CreateClient("transaction").GetConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create transaction service connection: %w", err)
+	}
+	if err := pb.RegisterTransactionServiceHandler(ctx, h.mux, transactionConn); err != nil {
+		return fmt.Errorf("failed to register transaction service: %w", err)
+	}
+
+	// Register Card Service
+	cardConn, err := bufconnManager.CreateClient("card").GetConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create card service connection: %w", err)
+	}
+	if err := pb.RegisterCardServiceHandler(ctx, h.mux, cardConn); err != nil {
+		return fmt.Errorf("failed to register card service: %w", err)
+	}
+
+	// Register Payment Service
+	paymentConn, err := bufconnManager.CreateClient("payment").GetConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create payment service connection: %w", err)
+	}
+	if err := pb.RegisterPaymentServiceHandler(ctx, h.mux, paymentConn); err != nil {
+		return fmt.Errorf("failed to register payment service: %w", err)
+	}
+
+	slog.Info("Registered all REST services in single mode")
+	return nil
+}
+
+// registerServicesNetwork registers services using network connections (separate mode)
+func (h *RestHandler) registerServicesNetwork(ctx context.Context) error {
+	// Register User Service
+	userConn, err := h.serviceManager.GetConnection(ctx, "user")
+	if err != nil {
+		return fmt.Errorf("failed to get user service connection: %w", err)
+	}
+	if err := pb.RegisterUserServiceHandler(ctx, h.mux, userConn); err != nil {
+		return fmt.Errorf("failed to register user service: %w", err)
+	}
+
+	// Register Transaction Service
+	transactionConn, err := h.serviceManager.GetConnection(ctx, "transaction")
+	if err != nil {
+		return fmt.Errorf("failed to get transaction service connection: %w", err)
+	}
+	if err := pb.RegisterTransactionServiceHandler(ctx, h.mux, transactionConn); err != nil {
+		return fmt.Errorf("failed to register transaction service: %w", err)
+	}
+
+	// Register Card Service
+	cardConn, err := h.serviceManager.GetConnection(ctx, "card")
+	if err != nil {
+		return fmt.Errorf("failed to get card service connection: %w", err)
+	}
+	if err := pb.RegisterCardServiceHandler(ctx, h.mux, cardConn); err != nil {
+		return fmt.Errorf("failed to register card service: %w", err)
+	}
+
+	// Register Payment Service
+	paymentConn, err := h.serviceManager.GetConnection(ctx, "payment")
+	if err != nil {
+		return fmt.Errorf("failed to get payment service connection: %w", err)
+	}
+	if err := pb.RegisterPaymentServiceHandler(ctx, h.mux, paymentConn); err != nil {
+		return fmt.Errorf("failed to register payment service: %w", err)
+	}
+
+	slog.Info("Registered all REST services in separate mode")
+	return nil
+}
+
+// RegisterRoutes registers REST routes with Fiber
+func (h *RestHandler) RegisterRoutes(router fiber.Router) {
+	// Convert the grpc-gateway mux to a Fiber handler
+	handler := adaptor.HTTPHandler(h.mux)
+
+	// Register all REST endpoints under the router
+	router.All("/*", handler)
+
+	slog.Info("REST routes registered")
+}
+
+// metadataAnnotator adds custom metadata to gRPC calls
+func metadataAnnotator(ctx context.Context, req *http.Request) metadata.MD {
+	md := metadata.MD{}
+
+	// Forward common headers
+	if userAgent := req.Header.Get("User-Agent"); userAgent != "" {
+		md.Set("user-agent", userAgent)
+	}
+
+	if auth := req.Header.Get("Authorization"); auth != "" {
+		md.Set("authorization", auth)
+	}
+
+	if requestID := req.Header.Get("X-Request-Id"); requestID != "" {
+		md.Set("x-request-id", requestID)
+	}
+
+	// Add client IP
+	if clientIP := getClientIP(req); clientIP != "" {
+		md.Set("x-client-ip", clientIP)
+	}
+
+	return md
+}
+
+// customGatewayErrorHandler handles errors from grpc-gateway
+func customGatewayErrorHandler(ctx context.Context, mux *runtime.ServeMux, marshaler runtime.Marshaler, w http.ResponseWriter, r *http.Request, err error) {
+	// Custom error response format
+	const fallback = `{"error": {"code": 500, "message": "Internal Server Error"}}`
+
+	w.Header().Set("Content-Type", marshaler.ContentType(nil))
+
+	// Extract gRPC status
+	s := runtime.HTTPStatusFromCode(runtime.ErrUnknownService.Code())
+	if st := runtime.HTTPStatusFromCode(runtime.ErrUnknownService.Code()); st != http.StatusInternalServerError {
+		s = st
+	}
+
+	w.WriteHeader(s)
+
+	// Create error response
+	errorResp := map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    s,
+			"message": err.Error(),
+		},
+	}
+
+	if buf, marshalErr := marshaler.Marshal(errorResp); marshalErr != nil {
+		w.Write([]byte(fallback))
+	} else {
+		w.Write(buf)
+	}
+}
+
+// forwardResponseOption modifies the response before sending to client
+func forwardResponseOption(ctx context.Context, w http.ResponseWriter, resp *http.Response) error {
+	// Add custom headers
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+	return nil
+}
+
+// incomingHeaderMatcher decides which headers to forward to gRPC
+func incomingHeaderMatcher(key string) (string, bool) {
+	key = strings.ToLower(key)
+
+	// Headers to forward
+	forwardHeaders := map[string]bool{
+		"authorization":  true,
+		"x-request-id":   true,
+		"user-agent":     true,
+		"content-type":   true,
+		"accept":         true,
+		"accept-language": true,
+	}
+
+	if forwardHeaders[key] {
+		return key, true
+	}
+
+	// Forward custom headers (x-*)
+	if strings.HasPrefix(key, "x-") {
+		return key, true
+	}
+
+	return "", false
+}
+
+// outgoingHeaderMatcher decides which headers to forward to client
+func outgoingHeaderMatcher(key string) (string, bool) {
+	key = strings.ToLower(key)
+
+	// Headers to forward back to client
+	forwardHeaders := map[string]bool{
+		"content-type":     true,
+		"x-request-id":     true,
+		"cache-control":    true,
+		"etag":            true,
+		"last-modified":   true,
+	}
+
+	if forwardHeaders[key] {
+		return key, true
+	}
+
+	// Forward custom headers (x-*)
+	if strings.HasPrefix(key, "x-") {
+		return key, true
+	}
+
+	return "", false
+}
+
+// getClientIP extracts the client IP address from the request
+func getClientIP(req *http.Request) string {
+	// Check X-Forwarded-For header first (proxy/load balancer)
+	forwarded := req.Header.Get("X-Forwarded-For")
+	if forwarded != "" {
+		// X-Forwarded-For can contain multiple IPs, take the first one
+		ips := strings.Split(forwarded, ",")
+		return strings.TrimSpace(ips[0])
+	}
+
+	// Check X-Real-IP header (nginx)
+	if realIP := req.Header.Get("X-Real-IP"); realIP != "" {
+		return realIP
+	}
+
+	// Fall back to RemoteAddr
+	if req.RemoteAddr != "" {
+		// RemoteAddr includes port, extract just the IP
+		ip := strings.Split(req.RemoteAddr, ":")[0]
+		return ip
+	}
+
+	return ""
+}
+
+// GetMux returns the grpc-gateway ServeMux for testing or advanced usage
+func (h *RestHandler) GetMux() *runtime.ServeMux {
+	return h.mux
+}
+
+// HealthCheck performs a health check on all registered services
+func (h *RestHandler) HealthCheck(ctx context.Context) map[string]bool {
+	health := make(map[string]bool)
+
+	// This would typically make actual health check calls to services
+	// For now, we'll just check if connections can be established
+	services := []string{"user", "transaction", "card", "payment"}
+
+	for _, service := range services {
+		_, err := h.serviceManager.GetConnection(ctx, service)
+		health[service] = err == nil
+	}
+
+	return health
+}

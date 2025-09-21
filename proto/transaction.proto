@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package etc_meisai.v1;
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto/transaction/v1;transactionv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// Transaction represents a toll transaction
+message Transaction {
+  string id = 1;
+  string card_id = 2;
+  string entry_gate_id = 3;
+  string exit_gate_id = 4;
+  google.protobuf.Timestamp entry_time = 5;
+  google.protobuf.Timestamp exit_time = 6;
+  double distance = 7;
+  int64 toll_amount = 8;
+  int64 discount_amount = 9;
+  int64 final_amount = 10;
+  PaymentStatus payment_status = 11;
+  google.protobuf.Timestamp transaction_date = 12;
+}
+
+enum PaymentStatus {
+  PAYMENT_STATUS_UNSPECIFIED = 0;
+  PAYMENT_STATUS_PENDING = 1;
+  PAYMENT_STATUS_COMPLETED = 2;
+  PAYMENT_STATUS_FAILED = 3;
+}
+
+// Request messages
+message GetTransactionRequest {
+  string id = 1;
+}
+
+message GetTransactionHistoryRequest {
+  string card_id = 1;
+  google.protobuf.Timestamp start_date = 2;
+  google.protobuf.Timestamp end_date = 3;
+  int32 page_size = 4;
+  string page_token = 5;
+}
+
+message TransactionList {
+  repeated Transaction transactions = 1;
+  string next_page_token = 2;
+  int64 total_amount = 3;
+}
+
+// TransactionService provides transaction operations
+service TransactionService {
+  // Get a single transaction
+  rpc GetTransaction(GetTransactionRequest) returns (Transaction) {
+    option (google.api.http) = {
+      get: "/api/v1/transactions/{id}"
+    };
+  }
+
+  // Get transaction history for a card
+  rpc GetTransactionHistory(GetTransactionHistoryRequest) returns (TransactionList) {
+    option (google.api.http) = {
+      get: "/api/v1/transactions"
+    };
+  }
+}

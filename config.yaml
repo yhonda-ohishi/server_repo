@@ -1,0 +1,35 @@
+deployment:
+  mode: single
+
+server:
+  http_port: 8080
+  grpc_port: 50051
+
+database:
+  url: ""
+  max_connections: 10
+  idle_connections: 5
+
+logging:
+  level: info
+  format: json
+
+cors:
+  origins: ["*"]
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+  headers: ["Content-Type", "Authorization"]
+
+external:
+  database_grpc_url: "localhost:50051"
+  handlers_grpc_url: "localhost:50052"
+  db_service_url: "localhost:50053"
+
+redis:
+  url: "localhost:6379"
+  password: ""
+  db: 0
+
+monitoring:
+  enabled: false
+  prometheus_port: 9090
+  jaeger_url: ""

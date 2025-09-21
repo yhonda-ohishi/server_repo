@@ -1,0 +1,253 @@
+package gateway
+
+import (
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
+	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/yhonda-ohishi/db-handler-server/internal/config"
+	"google.golang.org/grpc"
+)
+
+// GRPCWebHandler handles gRPC-Web requests for browser clients
+type GRPCWebHandler struct {
+	config     *config.Config
+	grpcServer *grpc.Server
+	wrapper    *grpcweb.WrappedGrpcServer
+}
+
+// NewGRPCWebHandler creates a new gRPC-Web handler
+func NewGRPCWebHandler(cfg *config.Config, grpcServer *grpc.Server) (*GRPCWebHandler, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if grpcServer == nil {
+		return nil, fmt.Errorf("gRPC server cannot be nil")
+	}
+
+	// Create gRPC-Web wrapper with options
+	wrapper := grpcweb.WrapServer(grpcServer,
+		grpcweb.WithCorsForRegisteredEndpointsOnly(false),
+		grpcweb.WithOriginFunc(func(origin string) bool {
+			return isOriginAllowed(origin, cfg.CORS.Origins)
+		}),
+		grpcweb.WithAllowedRequestHeaders(cfg.CORS.Headers),
+	)
+
+	handler := &GRPCWebHandler{
+		config:     cfg,
+		grpcServer: grpcServer,
+		wrapper:    wrapper,
+	}
+
+	return handler, nil
+}
+
+// RegisterRoutes registers gRPC-Web routes with Fiber
+func (h *GRPCWebHandler) RegisterRoutes(router fiber.Router) {
+	// Create HTTP handler for gRPC-Web
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		h.setCORSHeaders(w, r)
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Check if this is a gRPC-Web request
+		if !h.wrapper.IsGrpcWebRequest(r) {
+			http.Error(w, "Not a gRPC-Web request", http.StatusBadRequest)
+			return
+		}
+
+		// Handle the gRPC-Web request
+		h.wrapper.ServeHTTP(w, r)
+	})
+
+	// Convert HTTP handler to Fiber handler
+	fiberHandler := adaptor.HTTPHandler(httpHandler)
+
+	// Register gRPC-Web endpoints
+	router.All("/*", fiberHandler)
+
+	slog.Info("gRPC-Web routes registered")
+}
+
+// setCORSHeaders sets CORS headers for gRPC-Web requests
+func (h *GRPCWebHandler) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+
+	// Check if origin is allowed
+	if isOriginAllowed(origin, h.config.CORS.Origins) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	} else if len(h.config.CORS.Origins) == 1 && h.config.CORS.Origins[0] == "*" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+
+	// Set other CORS headers
+	w.Header().Set("Access-Control-Allow-Methods", strings.Join(h.config.CORS.Methods, ", "))
+	w.Header().Set("Access-Control-Allow-Headers", strings.Join(h.config.CORS.Headers, ", "))
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Max-Age", "3600")
+
+	// gRPC-Web specific headers
+	w.Header().Set("Access-Control-Expose-Headers", "grpc-status, grpc-message, grpc-status-details-bin")
+}
+
+// isOriginAllowed checks if the origin is in the allowed list
+func isOriginAllowed(origin string, allowedOrigins []string) bool {
+	if len(allowedOrigins) == 0 {
+		return false
+	}
+
+	// Allow all origins if "*" is specified
+	for _, allowed := range allowedOrigins {
+		if allowed == "*" {
+			return true
+		}
+		if allowed == origin {
+			return true
+		}
+		// Support wildcards (e.g., *.example.com)
+		if strings.HasPrefix(allowed, "*.") {
+			domain := strings.TrimPrefix(allowed, "*.")
+			if strings.HasSuffix(origin, "."+domain) || origin == domain {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// GetWrapper returns the grpc-web wrapper for testing or advanced usage
+func (h *GRPCWebHandler) GetWrapper() *grpcweb.WrappedGrpcServer {
+	return h.wrapper
+}
+
+// IsGRPCWebRequest checks if a request is a gRPC-Web request
+func (h *GRPCWebHandler) IsGRPCWebRequest(r *http.Request) bool {
+	return h.wrapper.IsGrpcWebRequest(r)
+}
+
+// Custom middleware for gRPC-Web
+func (h *GRPCWebHandler) createMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Convert Fiber context to HTTP request/response
+		req := &http.Request{
+			Method:     c.Method(),
+			URL:        c.Request().URI().URL(),
+			Header:     make(http.Header),
+			Body:       nil, // Will be handled by adaptor
+			RemoteAddr: c.IP(),
+		}
+
+		// Copy headers from Fiber to HTTP request
+		c.Request().Header.VisitAll(func(key, value []byte) {
+			req.Header.Add(string(key), string(value))
+		})
+
+		// Check if this is a gRPC-Web request
+		if !h.wrapper.IsGrpcWebRequest(req) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Not a gRPC-Web request",
+			})
+		}
+
+		return c.Next()
+	}
+}
+
+// HealthCheck performs a health check on the gRPC-Web handler
+func (h *GRPCWebHandler) HealthCheck() map[string]interface{} {
+	return map[string]interface{}{
+		"grpc_web": map[string]interface{}{
+			"status":  "healthy",
+			"wrapper": h.wrapper != nil,
+			"cors":    len(h.config.CORS.Origins) > 0,
+		},
+	}
+}
+
+// GetSupportedMethods returns the supported HTTP methods for gRPC-Web
+func (h *GRPCWebHandler) GetSupportedMethods() []string {
+	return []string{"POST", "OPTIONS"}
+}
+
+// GetRequiredHeaders returns the required headers for gRPC-Web requests
+func (h *GRPCWebHandler) GetRequiredHeaders() []string {
+	return []string{
+		"Content-Type",
+		"Accept",
+		"X-Grpc-Web",
+		"X-User-Agent",
+	}
+}
+
+// ValidateRequest validates if a request is a valid gRPC-Web request
+func (h *GRPCWebHandler) ValidateRequest(c *fiber.Ctx) error {
+	// Check method
+	method := c.Method()
+	if method != "POST" && method != "OPTIONS" {
+		return fiber.NewError(fiber.StatusMethodNotAllowed, "Method not allowed for gRPC-Web")
+	}
+
+	// For OPTIONS requests (preflight), just check CORS
+	if method == "OPTIONS" {
+		return nil
+	}
+
+	// Check Content-Type for POST requests
+	contentType := c.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "application/grpc-web") {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid Content-Type for gRPC-Web")
+	}
+
+	return nil
+}
+
+// LogRequest logs gRPC-Web requests for debugging
+func (h *GRPCWebHandler) LogRequest(c *fiber.Ctx) {
+	slog.Info("gRPC-Web request",
+		"method", c.Method(),
+		"path", c.Path(),
+		"content_type", c.Get("Content-Type"),
+		"user_agent", c.Get("User-Agent"),
+		"origin", c.Get("Origin"),
+		"client_ip", c.IP(),
+	)
+}
+
+// CreateStreamingHandler creates a handler for streaming gRPC-Web calls
+func (h *GRPCWebHandler) CreateStreamingHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Validate request
+		if err := h.ValidateRequest(c); err != nil {
+			return err
+		}
+
+		// Log request
+		h.LogRequest(c)
+
+		// Convert to HTTP and handle with wrapper
+		httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.setCORSHeaders(w, r)
+
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			h.wrapper.ServeHTTP(w, r)
+		})
+
+		// Use adaptor to handle the request
+		return adaptor.HTTPHandler(httpHandler)(c)
+	}
+}

@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto";
+
+import "google/api/annotations.proto";
+import "github.com/yhonda-ohishi/db_service/src/proto/ryohi.proto";
+
+// Gateway wrapper for ETCMeisaiService with HTTP annotations
+service ETCMeisaiGateway {
+  // List ETC明細データ
+  rpc List(ryohi.ListETCMeisaiRequest) returns (ryohi.ListETCMeisaiResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/db/etc-meisai"
+    };
+  }
+
+  // Get specific ETC明細データ
+  rpc Get(ryohi.GetETCMeisaiRequest) returns (ryohi.ETCMeisaiResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/db/etc-meisai/{id}"
+    };
+  }
+
+  // Create new ETC明細データ
+  rpc Create(ryohi.CreateETCMeisaiRequest) returns (ryohi.ETCMeisaiResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/db/etc-meisai"
+      body: "etc_meisai"
+    };
+  }
+
+  // Update ETC明細データ
+  rpc Update(ryohi.UpdateETCMeisaiRequest) returns (ryohi.ETCMeisaiResponse) {
+    option (google.api.http) = {
+      put: "/api/v1/db/etc-meisai/{etc_meisai.id}"
+      body: "etc_meisai"
+    };
+  }
+
+  // Delete ETC明細データ
+  rpc Delete(ryohi.DeleteETCMeisaiRequest) returns (ryohi.Empty) {
+    option (google.api.http) = {
+      delete: "/api/v1/db/etc-meisai/{id}"
+    };
+  }
+}
+
+// Gateway wrapper for DTakoUriageKeihiService with HTTP annotations
+service DTakoUriageKeihiGateway {
+  // Create 経費精算データ
+  rpc Create(ryohi.CreateDTakoUriageKeihiRequest) returns (ryohi.DTakoUriageKeihiResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/db/dtako-uriage-keihi"
+      body: "dtako_uriage_keihi"
+    };
+  }
+}
+
+// Gateway wrapper for DTakoFerryRowsService with HTTP annotations
+service DTakoFerryRowsGateway {
+  // Create フェリー運行データ
+  rpc Create(ryohi.CreateDTakoFerryRowsRequest) returns (ryohi.DTakoFerryRowsResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/db/dtako-ferry-rows"
+      body: "dtako_ferry_rows"
+    };
+  }
+}
+
+// Gateway wrapper for ETCMeisaiMappingService with HTTP annotations
+service ETCMeisaiMappingGateway {
+  // Create マッピング
+  rpc Create(ryohi.CreateETCMeisaiMappingRequest) returns (ryohi.ETCMeisaiMappingResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/db/etc-meisai-mapping"
+      body: "etc_meisai_mapping"
+    };
+  }
+}

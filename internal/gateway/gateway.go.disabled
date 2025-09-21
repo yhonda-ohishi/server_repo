@@ -1,0 +1,444 @@
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/fiber/v2/middleware/requestid"
+	"github.com/yhonda-ohishi/db-handler-server/internal/client"
+	"github.com/yhonda-ohishi/db-handler-server/internal/config"
+	"github.com/yhonda-ohishi/db-handler-server/internal/services"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+)
+
+// Gateway manages all protocol handlers and service connections
+type Gateway struct {
+	config         *config.Config
+	app            *fiber.App
+	grpcServer     *grpc.Server
+	serviceManager *client.ServiceManager
+	serviceRegistry *services.ServiceRegistry
+
+	// Protocol handlers
+	restHandler     *RestHandler
+	grpcWebHandler  *GRPCWebHandler
+	jsonRPCHandler  *JSONRPCHandler
+	swaggerHandler  *SwaggerHandler
+
+	// Runtime state
+	httpServer    *http.Server
+	grpcListener  net.Listener
+	shutdownCh    chan os.Signal
+	wg           sync.WaitGroup
+	mu           sync.RWMutex
+	isRunning    bool
+}
+
+// NewGateway creates a new gateway instance
+func NewGateway(cfg *config.Config) (*Gateway, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Create service manager
+	serviceManager := client.NewServiceManager(cfg)
+
+	// Create service registry
+	serviceRegistry := services.NewServiceRegistry()
+
+	// Create Fiber app with configuration
+	app := fiber.New(fiber.Config{
+		ServerHeader:  "ETC-Meisai-Gateway",
+		AppName:       "ETC Meisai API Gateway",
+		ReadTimeout:   30 * time.Second,
+		WriteTimeout:  30 * time.Second,
+		IdleTimeout:   120 * time.Second,
+		ErrorHandler:  customErrorHandler,
+		JSONEncoder:   defaultJSONEncoder,
+		JSONDecoder:   defaultJSONDecoder,
+	})
+
+	// Add global middleware
+	setupMiddleware(app, cfg)
+
+	// Create gRPC server
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			unaryLoggingInterceptor,
+			unaryErrorInterceptor,
+		),
+		grpc.ChainStreamInterceptor(
+			streamLoggingInterceptor,
+			streamErrorInterceptor,
+		),
+	)
+
+	// Enable reflection for development
+	reflection.Register(grpcServer)
+
+	gateway := &Gateway{
+		config:          cfg,
+		app:            app,
+		grpcServer:     grpcServer,
+		serviceManager: serviceManager,
+		serviceRegistry: serviceRegistry,
+		shutdownCh:     make(chan os.Signal, 1),
+	}
+
+	// Initialize protocol handlers
+	if err := gateway.initializeHandlers(); err != nil {
+		return nil, fmt.Errorf("failed to initialize handlers: %w", err)
+	}
+
+	// Register services based on deployment mode
+	if err := gateway.registerServices(); err != nil {
+		return nil, fmt.Errorf("failed to register services: %w", err)
+	}
+
+	// Setup routes
+	gateway.setupRoutes()
+
+	return gateway, nil
+}
+
+// initializeHandlers creates all protocol handlers
+func (g *Gateway) initializeHandlers() error {
+	var err error
+
+	// Create REST handler
+	g.restHandler, err = NewRestHandler(g.config, g.serviceManager)
+	if err != nil {
+		return fmt.Errorf("failed to create REST handler: %w", err)
+	}
+
+	// Create gRPC-Web handler
+	g.grpcWebHandler, err = NewGRPCWebHandler(g.config, g.grpcServer)
+	if err != nil {
+		return fmt.Errorf("failed to create gRPC-Web handler: %w", err)
+	}
+
+	// Create JSON-RPC handler
+	g.jsonRPCHandler, err = NewJSONRPCHandler(g.config, g.serviceManager)
+	if err != nil {
+		return fmt.Errorf("failed to create JSON-RPC handler: %w", err)
+	}
+
+	// Create Swagger handler
+	g.swaggerHandler, err = NewSwaggerHandler(g.config)
+	if err != nil {
+		return fmt.Errorf("failed to create Swagger handler: %w", err)
+	}
+
+	return nil
+}
+
+// registerServices registers gRPC services based on deployment mode
+func (g *Gateway) registerServices() error {
+	if g.config.IsSingleMode() {
+		// In single mode, register all services to the same gRPC server
+		g.serviceRegistry.RegisterAll(g.grpcServer)
+		slog.Info("Registered all services in single mode")
+	} else {
+		// In separate mode, services are external - no local registration needed
+		slog.Info("Running in separate mode - services are external")
+	}
+	return nil
+}
+
+// setupRoutes configures all API routes
+func (g *Gateway) setupRoutes() {
+	// Health check endpoint
+	g.app.Get("/health", g.healthHandler)
+
+	// API versioning
+	api := g.app.Group("/api")
+	v1 := api.Group("/v1")
+
+	// REST API routes (grpc-gateway)
+	g.restHandler.RegisterRoutes(v1.Group("/rest"))
+
+	// JSON-RPC routes
+	g.jsonRPCHandler.RegisterRoutes(v1.Group("/jsonrpc"))
+
+	// gRPC-Web routes
+	g.grpcWebHandler.RegisterRoutes(g.app.Group("/grpc"))
+
+	// Swagger UI routes
+	g.swaggerHandler.RegisterRoutes(g.app.Group("/docs"))
+
+	// Service info endpoint
+	g.app.Get("/api/info", g.serviceInfoHandler)
+}
+
+// Start starts the gateway server
+func (g *Gateway) Start() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.isRunning {
+		return fmt.Errorf("gateway is already running")
+	}
+
+	// Set up signal handling
+	signal.Notify(g.shutdownCh, os.Interrupt, syscall.SIGTERM)
+
+	// Start gRPC server
+	if err := g.startGRPCServer(); err != nil {
+		return fmt.Errorf("failed to start gRPC server: %w", err)
+	}
+
+	// Start HTTP server
+	if err := g.startHTTPServer(); err != nil {
+		return fmt.Errorf("failed to start HTTP server: %w", err)
+	}
+
+	g.isRunning = true
+
+	slog.Info("Gateway started successfully",
+		"http_port", g.config.Server.HTTPPort,
+		"grpc_port", g.config.Server.GRPCPort,
+		"deployment_mode", g.config.Deployment.Mode,
+	)
+
+	// Wait for shutdown signal
+	go g.handleShutdown()
+
+	return nil
+}
+
+// startGRPCServer starts the gRPC server
+func (g *Gateway) startGRPCServer() error {
+	address := fmt.Sprintf(":%d", g.config.Server.GRPCPort)
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", address, err)
+	}
+
+	g.grpcListener = listener
+
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		slog.Info("Starting gRPC server", "address", address)
+		if err := g.grpcServer.Serve(listener); err != nil {
+			slog.Error("gRPC server error", "error", err)
+		}
+	}()
+
+	return nil
+}
+
+// startHTTPServer starts the HTTP server
+func (g *Gateway) startHTTPServer() error {
+	address := fmt.Sprintf(":%d", g.config.Server.HTTPPort)
+
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		slog.Info("Starting HTTP server", "address", address)
+		if err := g.app.Listen(address); err != nil {
+			slog.Error("HTTP server error", "error", err)
+		}
+	}()
+
+	return nil
+}
+
+// handleShutdown handles graceful shutdown
+func (g *Gateway) handleShutdown() {
+	<-g.shutdownCh
+	slog.Info("Shutdown signal received, starting graceful shutdown...")
+
+	if err := g.Shutdown(context.Background()); err != nil {
+		slog.Error("Error during shutdown", "error", err)
+	}
+}
+
+// Shutdown gracefully shuts down the gateway
+func (g *Gateway) Shutdown(ctx context.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.isRunning {
+		return fmt.Errorf("gateway is not running")
+	}
+
+	// Create a timeout context for shutdown
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var errs []error
+
+	// Shutdown HTTP server
+	if g.httpServer != nil {
+		slog.Info("Shutting down HTTP server...")
+		if err := g.httpServer.Shutdown(shutdownCtx); err != nil {
+			errs = append(errs, fmt.Errorf("HTTP server shutdown: %w", err))
+		}
+	}
+
+	// Shutdown gRPC server
+	if g.grpcServer != nil {
+		slog.Info("Shutting down gRPC server...")
+		done := make(chan struct{})
+		go func() {
+			g.grpcServer.GracefulStop()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+			slog.Warn("gRPC server graceful shutdown timeout, forcing stop")
+			g.grpcServer.Stop()
+		}
+	}
+
+	// Close service connections
+	if g.serviceManager != nil {
+		slog.Info("Closing service connections...")
+		if err := g.serviceManager.CloseAll(); err != nil {
+			errs = append(errs, fmt.Errorf("service manager close: %w", err))
+		}
+	}
+
+	// Wait for all goroutines to finish
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		slog.Warn("Shutdown timeout reached")
+	}
+
+	g.isRunning = false
+
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown errors: %v", errs)
+	}
+
+	slog.Info("Gateway shutdown completed")
+	return nil
+}
+
+// IsRunning returns whether the gateway is currently running
+func (g *Gateway) IsRunning() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.isRunning
+}
+
+// GetServiceManager returns the service manager
+func (g *Gateway) GetServiceManager() *client.ServiceManager {
+	return g.serviceManager
+}
+
+// GetServiceRegistry returns the service registry
+func (g *Gateway) GetServiceRegistry() *services.ServiceRegistry {
+	return g.serviceRegistry
+}
+
+// healthHandler handles health check requests
+func (g *Gateway) healthHandler(c *fiber.Ctx) error {
+	health := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC(),
+		"version":   "1.0.0",
+		"deployment_mode": g.config.Deployment.Mode,
+		"services":  g.serviceRegistry.IsHealthy(),
+	}
+
+	return c.JSON(health)
+}
+
+// serviceInfoHandler returns information about available services
+func (g *Gateway) serviceInfoHandler(c *fiber.Ctx) error {
+	info := map[string]interface{}{
+		"gateway": map[string]interface{}{
+			"version":         "1.0.0",
+			"deployment_mode": g.config.Deployment.Mode,
+			"protocols":       []string{"REST", "gRPC", "gRPC-Web", "JSON-RPC"},
+		},
+		"services": g.serviceRegistry.GetServiceInfo(),
+	}
+
+	return c.JSON(info)
+}
+
+// setupMiddleware configures global middleware
+func setupMiddleware(app *fiber.App, cfg *config.Config) {
+	// Request ID middleware
+	app.Use(requestid.New())
+
+	// Logger middleware
+	app.Use(logger.New(logger.Config{
+		Format:     "${time} ${status} - ${method} ${path} - ${ip} - ${latency}\n",
+		TimeFormat: "2006-01-02 15:04:05",
+		TimeZone:   "UTC",
+	}))
+
+	// Recovery middleware
+	app.Use(recover.New())
+
+	// CORS middleware
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     joinStrings(cfg.CORS.Origins, ","),
+		AllowMethods:     joinStrings(cfg.CORS.Methods, ","),
+		AllowHeaders:     joinStrings(cfg.CORS.Headers, ","),
+		AllowCredentials: true,
+		MaxAge:          3600,
+	}))
+}
+
+// Helper functions
+func joinStrings(slice []string, separator string) string {
+	if len(slice) == 0 {
+		return ""
+	}
+	result := slice[0]
+	for i := 1; i < len(slice); i++ {
+		result += separator + slice[i]
+	}
+	return result
+}
+
+func customErrorHandler(c *fiber.Ctx, err error) error {
+	code := fiber.StatusInternalServerError
+	if e, ok := err.(*fiber.Error); ok {
+		code = e.Code
+	}
+
+	return c.Status(code).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":    code,
+			"message": err.Error(),
+		},
+	})
+}
+
+func defaultJSONEncoder(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func defaultJSONDecoder(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
+}

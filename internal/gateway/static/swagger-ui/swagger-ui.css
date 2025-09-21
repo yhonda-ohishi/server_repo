@@ -1,0 +1,33 @@
+/* Basic Swagger UI CSS - In production, use the full Swagger UI CSS */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 20px;
+    background-color: #f5f5f5;
+}
+
+#swagger-ui {
+    max-width: 1200px;
+    margin: 0 auto;
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+h1, h2, h3 {
+    color: #333;
+}
+
+.info {
+    margin-bottom: 30px;
+}
+
+.loading {
+    text-align: center;
+    padding: 50px;
+    color: #666;
+}
+
+/* Note: In production, replace this with the actual Swagger UI CSS files */
+/* This is a minimal placeholder for the embedded filesystem */

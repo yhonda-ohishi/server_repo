@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package dbservice.integration.v1;
+
+option go_package = "github.com/yhonda-ohishi/db-handler-server/proto/dbservice/v1";
+
+// Service Registry Configuration
+// This defines how db_service gRPC services are integrated via bufconn
+
+// ServiceRegistryConfig defines the configuration for service registration
+message ServiceRegistryConfig {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_SINGLE = 1;      // All services in single process via bufconn
+    MODE_SEPARATE = 2;    // Services in separate processes via network
+  }
+
+  Mode mode = 1;
+  bool enable_db_services = 2;
+  BufconnConfig bufconn_config = 3;
+}
+
+// BufconnConfig defines bufconn configuration
+message BufconnConfig {
+  int32 buffer_size = 1;  // Buffer size in bytes (default 1MB)
+  bool enable_reflection = 2;
+}
+
+// ServiceEndpoints defines available db_service endpoints
+message ServiceEndpoints {
+  string etc_meisai_service = 1;        // ETCMeisaiService endpoint
+  string dtako_uriage_keihi_service = 2; // DTakoUriageKeihiService endpoint
+  string dtako_ferry_rows_service = 3;   // DTakoFerryRowsService endpoint
+  string etc_meisai_mapping_service = 4; // ETCMeisaiMappingService endpoint
+}
+
+// Integration service for managing db_service connections
+service IntegrationService {
+  // GetServiceEndpoints returns available db_service endpoints
+  rpc GetServiceEndpoints(GetServiceEndpointsRequest) returns (GetServiceEndpointsResponse);
+
+  // CheckServiceHealth checks health of db_services
+  rpc CheckServiceHealth(CheckServiceHealthRequest) returns (CheckServiceHealthResponse);
+
+  // GetServiceRegistry returns the current service registry configuration
+  rpc GetServiceRegistry(GetServiceRegistryRequest) returns (GetServiceRegistryResponse);
+}
+
+message GetServiceEndpointsRequest {
+  ServiceRegistryConfig.Mode mode = 1;
+}
+
+message GetServiceEndpointsResponse {
+  ServiceEndpoints endpoints = 1;
+  bool is_bufconn = 2;  // true if using bufconn, false if network
+}
+
+message CheckServiceHealthRequest {
+  repeated string service_names = 1;
+}
+
+message CheckServiceHealthResponse {
+  map<string, ServiceHealth> services = 1;
+}
+
+message ServiceHealth {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_HEALTHY = 1;
+    STATUS_UNHEALTHY = 2;
+    STATUS_NOT_REGISTERED = 3;
+  }
+
+  Status status = 1;
+  string message = 2;
+  int64 last_check_timestamp = 3;
+}
+
+message GetServiceRegistryRequest {}
+
+message GetServiceRegistryResponse {
+  ServiceRegistryConfig config = 1;
+  repeated string registered_services = 2;
+  int64 uptime_seconds = 3;
+}
+
+// Mock data configuration for testing
+message MockDataConfig {
+  bool enable_mock_data = 1;
+  int32 initial_record_count = 2;
+
+  message ETCMeisaiMockData {
+    repeated ETCMeisaiRecord records = 1;
+  }
+
+  message ETCMeisaiRecord {
+    int64 id = 1;
+    string date_to = 2;
+    string ic_fr = 3;
+    string ic_to = 4;
+    int32 price = 5;
+    string etc_num = 6;
+    string hash = 7;
+  }
+
+  ETCMeisaiMockData etc_meisai_data = 3;
+}

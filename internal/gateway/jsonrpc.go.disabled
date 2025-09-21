@@ -1,0 +1,506 @@
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/yhonda-ohishi/db-handler-server/internal/client"
+	"github.com/yhonda-ohishi/db-handler-server/internal/config"
+	pb "github.com/yhonda-ohishi/db-handler-server/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+)
+
+// JSONRPCHandler handles JSON-RPC 2.0 requests
+type JSONRPCHandler struct {
+	config         *config.Config
+	serviceManager *client.ServiceManager
+	methodMap      map[string]*MethodInfo
+	mu             sync.RWMutex
+}
+
+// MethodInfo contains information about a gRPC method for JSON-RPC mapping
+type MethodInfo struct {
+	ServiceName string
+	MethodName  string
+	InputType   reflect.Type
+	OutputType  reflect.Type
+	Handler     func(context.Context, interface{}) (interface{}, error)
+}
+
+// JSONRPCRequest represents a JSON-RPC 2.0 request
+type JSONRPCRequest struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
+	ID      interface{} `json:"id,omitempty"`
+}
+
+// JSONRPCResponse represents a JSON-RPC 2.0 response
+type JSONRPCResponse struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   *JSONRPCError `json:"error,omitempty"`
+	ID      interface{} `json:"id,omitempty"`
+}
+
+// JSONRPCError represents a JSON-RPC 2.0 error
+type JSONRPCError struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// JSON-RPC 2.0 error codes
+const (
+	ParseError     = -32700
+	InvalidRequest = -32600
+	MethodNotFound = -32601
+	InvalidParams  = -32602
+	InternalError  = -32603
+)
+
+// NewJSONRPCHandler creates a new JSON-RPC handler
+func NewJSONRPCHandler(cfg *config.Config, serviceManager *client.ServiceManager) (*JSONRPCHandler, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if serviceManager == nil {
+		return nil, fmt.Errorf("service manager cannot be nil")
+	}
+
+	handler := &JSONRPCHandler{
+		config:         cfg,
+		serviceManager: serviceManager,
+		methodMap:      make(map[string]*MethodInfo),
+	}
+
+	// Register all available methods
+	if err := handler.registerMethods(); err != nil {
+		return nil, fmt.Errorf("failed to register methods: %w", err)
+	}
+
+	return handler, nil
+}
+
+// registerMethods registers all gRPC methods for JSON-RPC access
+func (h *JSONRPCHandler) registerMethods() error {
+	// User Service methods
+	h.registerMethod("user.get", "user", "GetUser", &pb.GetUserRequest{}, &pb.User{})
+	h.registerMethod("user.create", "user", "CreateUser", &pb.CreateUserRequest{}, &pb.User{})
+	h.registerMethod("user.update", "user", "UpdateUser", &pb.UpdateUserRequest{}, &pb.User{})
+	h.registerMethod("user.delete", "user", "DeleteUser", &pb.DeleteUserRequest{}, &pb.DeleteUserResponse{})
+	h.registerMethod("user.list", "user", "ListUsers", &pb.ListUsersRequest{}, &pb.ListUsersResponse{})
+
+	// Transaction Service methods
+	h.registerMethod("transaction.get", "transaction", "GetTransaction", &pb.GetTransactionRequest{}, &pb.Transaction{})
+	h.registerMethod("transaction.history", "transaction", "GetTransactionHistory", &pb.GetTransactionHistoryRequest{}, &pb.GetTransactionHistoryResponse{})
+
+	// Card Service methods
+	h.registerMethod("card.get", "card", "GetCard", &pb.GetCardRequest{}, &pb.Card{})
+	h.registerMethod("card.create", "card", "CreateCard", &pb.CreateCardRequest{}, &pb.Card{})
+	h.registerMethod("card.update", "card", "UpdateCard", &pb.UpdateCardRequest{}, &pb.Card{})
+	h.registerMethod("card.delete", "card", "DeleteCard", &pb.DeleteCardRequest{}, &pb.DeleteCardResponse{})
+	h.registerMethod("card.list", "card", "ListCards", &pb.ListCardsRequest{}, &pb.ListCardsResponse{})
+
+	// Payment Service methods
+	h.registerMethod("payment.get", "payment", "GetPayment", &pb.GetPaymentRequest{}, &pb.Payment{})
+	h.registerMethod("payment.create", "payment", "CreatePayment", &pb.CreatePaymentRequest{}, &pb.Payment{})
+	h.registerMethod("payment.list", "payment", "ListPayments", &pb.ListPaymentsRequest{}, &pb.ListPaymentsResponse{})
+	h.registerMethod("payment.statement", "payment", "GetMonthlyStatement", &pb.GetMonthlyStatementRequest{}, &pb.MonthlyStatement{})
+
+	slog.Info("Registered JSON-RPC methods", "count", len(h.methodMap))
+	return nil
+}
+
+// registerMethod registers a gRPC method for JSON-RPC access
+func (h *JSONRPCHandler) registerMethod(jsonrpcMethod, serviceName, grpcMethod string, inputProto, outputProto proto.Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.methodMap[jsonrpcMethod] = &MethodInfo{
+		ServiceName: serviceName,
+		MethodName:  grpcMethod,
+		InputType:   reflect.TypeOf(inputProto).Elem(),
+		OutputType:  reflect.TypeOf(outputProto).Elem(),
+		Handler:     h.createMethodHandler(serviceName, grpcMethod),
+	}
+}
+
+// createMethodHandler creates a handler function for a specific gRPC method
+func (h *JSONRPCHandler) createMethodHandler(serviceName, methodName string) func(context.Context, interface{}) (interface{}, error) {
+	return func(ctx context.Context, params interface{}) (interface{}, error) {
+		// Get gRPC connection
+		conn, err := h.serviceManager.GetConnection(ctx, serviceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get connection for service %s: %w", serviceName, err)
+		}
+
+		// Call the appropriate service method
+		switch serviceName {
+		case "user":
+			return h.callUserService(ctx, conn, methodName, params)
+		case "transaction":
+			return h.callTransactionService(ctx, conn, methodName, params)
+		case "card":
+			return h.callCardService(ctx, conn, methodName, params)
+		case "payment":
+			return h.callPaymentService(ctx, conn, methodName, params)
+		default:
+			return nil, fmt.Errorf("unknown service: %s", serviceName)
+		}
+	}
+}
+
+// RegisterRoutes registers JSON-RPC routes with Fiber
+func (h *JSONRPCHandler) RegisterRoutes(router fiber.Router) {
+	// Single endpoint for all JSON-RPC calls
+	router.Post("/", h.handleJSONRPC)
+
+	// Method listing endpoint
+	router.Get("/methods", h.listMethods)
+
+	slog.Info("JSON-RPC routes registered")
+}
+
+// handleJSONRPC handles JSON-RPC 2.0 requests
+func (h *JSONRPCHandler) handleJSONRPC(c *fiber.Ctx) error {
+	// Parse request body
+	var body json.RawMessage
+	if err := c.BodyParser(&body); err != nil {
+		return h.sendError(c, nil, ParseError, "Parse error", nil)
+	}
+
+	// Check if it's a batch request
+	if strings.TrimSpace(string(body))[0] == '[' {
+		return h.handleBatchRequest(c, body)
+	}
+
+	// Handle single request
+	return h.handleSingleRequest(c, body)
+}
+
+// handleSingleRequest handles a single JSON-RPC request
+func (h *JSONRPCHandler) handleSingleRequest(c *fiber.Ctx, body json.RawMessage) error {
+	var req JSONRPCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return h.sendError(c, nil, ParseError, "Parse error", nil)
+	}
+
+	response := h.processRequest(c.UserContext(), &req)
+	return c.JSON(response)
+}
+
+// handleBatchRequest handles batch JSON-RPC requests
+func (h *JSONRPCHandler) handleBatchRequest(c *fiber.Ctx, body json.RawMessage) error {
+	var requests []JSONRPCRequest
+	if err := json.Unmarshal(body, &requests); err != nil {
+		return h.sendError(c, nil, ParseError, "Parse error", nil)
+	}
+
+	if len(requests) == 0 {
+		return h.sendError(c, nil, InvalidRequest, "Invalid Request", nil)
+	}
+
+	// Process all requests
+	responses := make([]JSONRPCResponse, 0, len(requests))
+	for _, req := range requests {
+		response := h.processRequest(c.UserContext(), &req)
+		// Only include responses for requests with IDs (not notifications)
+		if response.ID != nil || response.Error != nil {
+			responses = append(responses, *response)
+		}
+	}
+
+	// If all requests were notifications, return 204 No Content
+	if len(responses) == 0 {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+
+	return c.JSON(responses)
+}
+
+// processRequest processes a single JSON-RPC request
+func (h *JSONRPCHandler) processRequest(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	// Validate JSON-RPC version
+	if req.JSONRPC != "2.0" {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			Error:   &JSONRPCError{Code: InvalidRequest, Message: "Invalid Request"},
+			ID:      req.ID,
+		}
+	}
+
+	// Find method
+	h.mu.RLock()
+	methodInfo, exists := h.methodMap[req.Method]
+	h.mu.RUnlock()
+
+	if !exists {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			Error:   &JSONRPCError{Code: MethodNotFound, Message: "Method not found"},
+			ID:      req.ID,
+		}
+	}
+
+	// Call method
+	result, err := methodInfo.Handler(ctx, req.Params)
+	if err != nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			Error:   &JSONRPCError{Code: InternalError, Message: err.Error()},
+			ID:      req.ID,
+		}
+	}
+
+	// For notifications (no ID), don't send response
+	if req.ID == nil {
+		return nil
+	}
+
+	return &JSONRPCResponse{
+		JSONRPC: "2.0",
+		Result:  result,
+		ID:      req.ID,
+	}
+}
+
+// sendError sends a JSON-RPC error response
+func (h *JSONRPCHandler) sendError(c *fiber.Ctx, id interface{}, code int, message string, data interface{}) error {
+	response := JSONRPCResponse{
+		JSONRPC: "2.0",
+		Error: &JSONRPCError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+		ID: id,
+	}
+	return c.JSON(response)
+}
+
+// listMethods returns available JSON-RPC methods
+func (h *JSONRPCHandler) listMethods(c *fiber.Ctx) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	methods := make([]map[string]interface{}, 0, len(h.methodMap))
+	for method, info := range h.methodMap {
+		methods = append(methods, map[string]interface{}{
+			"method":   method,
+			"service":  info.ServiceName,
+			"grpc_method": info.MethodName,
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"methods": methods,
+		"count":   len(methods),
+	})
+}
+
+// Service method callers
+
+func (h *JSONRPCHandler) callUserService(ctx context.Context, conn *grpc.ClientConn, method string, params interface{}) (interface{}, error) {
+	client := pb.NewUserServiceClient(conn)
+
+	switch method {
+	case "GetUser":
+		req, err := h.parseParams(params, &pb.GetUserRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetUser(ctx, req.(*pb.GetUserRequest))
+
+	case "CreateUser":
+		req, err := h.parseParams(params, &pb.CreateUserRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.CreateUser(ctx, req.(*pb.CreateUserRequest))
+
+	case "UpdateUser":
+		req, err := h.parseParams(params, &pb.UpdateUserRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.UpdateUser(ctx, req.(*pb.UpdateUserRequest))
+
+	case "DeleteUser":
+		req, err := h.parseParams(params, &pb.DeleteUserRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.DeleteUser(ctx, req.(*pb.DeleteUserRequest))
+
+	case "ListUsers":
+		req, err := h.parseParams(params, &pb.ListUsersRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.ListUsers(ctx, req.(*pb.ListUsersRequest))
+
+	default:
+		return nil, fmt.Errorf("unknown user service method: %s", method)
+	}
+}
+
+func (h *JSONRPCHandler) callTransactionService(ctx context.Context, conn *grpc.ClientConn, method string, params interface{}) (interface{}, error) {
+	client := pb.NewTransactionServiceClient(conn)
+
+	switch method {
+	case "GetTransaction":
+		req, err := h.parseParams(params, &pb.GetTransactionRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetTransaction(ctx, req.(*pb.GetTransactionRequest))
+
+	case "GetTransactionHistory":
+		req, err := h.parseParams(params, &pb.GetTransactionHistoryRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetTransactionHistory(ctx, req.(*pb.GetTransactionHistoryRequest))
+
+	default:
+		return nil, fmt.Errorf("unknown transaction service method: %s", method)
+	}
+}
+
+func (h *JSONRPCHandler) callCardService(ctx context.Context, conn *grpc.ClientConn, method string, params interface{}) (interface{}, error) {
+	client := pb.NewCardServiceClient(conn)
+
+	switch method {
+	case "GetCard":
+		req, err := h.parseParams(params, &pb.GetCardRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetCard(ctx, req.(*pb.GetCardRequest))
+
+	case "CreateCard":
+		req, err := h.parseParams(params, &pb.CreateCardRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.CreateCard(ctx, req.(*pb.CreateCardRequest))
+
+	case "UpdateCard":
+		req, err := h.parseParams(params, &pb.UpdateCardRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.UpdateCard(ctx, req.(*pb.UpdateCardRequest))
+
+	case "DeleteCard":
+		req, err := h.parseParams(params, &pb.DeleteCardRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.DeleteCard(ctx, req.(*pb.DeleteCardRequest))
+
+	case "ListCards":
+		req, err := h.parseParams(params, &pb.ListCardsRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.ListCards(ctx, req.(*pb.ListCardsRequest))
+
+	default:
+		return nil, fmt.Errorf("unknown card service method: %s", method)
+	}
+}
+
+func (h *JSONRPCHandler) callPaymentService(ctx context.Context, conn *grpc.ClientConn, method string, params interface{}) (interface{}, error) {
+	client := pb.NewPaymentServiceClient(conn)
+
+	switch method {
+	case "GetPayment":
+		req, err := h.parseParams(params, &pb.GetPaymentRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetPayment(ctx, req.(*pb.GetPaymentRequest))
+
+	case "CreatePayment":
+		req, err := h.parseParams(params, &pb.CreatePaymentRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.CreatePayment(ctx, req.(*pb.CreatePaymentRequest))
+
+	case "ListPayments":
+		req, err := h.parseParams(params, &pb.ListPaymentsRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.ListPayments(ctx, req.(*pb.ListPaymentsRequest))
+
+	case "GetMonthlyStatement":
+		req, err := h.parseParams(params, &pb.GetMonthlyStatementRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return client.GetMonthlyStatement(ctx, req.(*pb.GetMonthlyStatementRequest))
+
+	default:
+		return nil, fmt.Errorf("unknown payment service method: %s", method)
+	}
+}
+
+// parseParams converts JSON-RPC params to protobuf message
+func (h *JSONRPCHandler) parseParams(params interface{}, target proto.Message) (proto.Message, error) {
+	if params == nil {
+		return target, nil
+	}
+
+	// Convert params to JSON
+	jsonData, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal params: %w", err)
+	}
+
+	// Parse JSON to protobuf
+	if err := protojson.Unmarshal(jsonData, target); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal params: %w", err)
+	}
+
+	return target, nil
+}
+
+// HealthCheck performs a health check on the JSON-RPC handler
+func (h *JSONRPCHandler) HealthCheck() map[string]interface{} {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	return map[string]interface{}{
+		"jsonrpc": map[string]interface{}{
+			"status":        "healthy",
+			"version":       "2.0",
+			"methods_count": len(h.methodMap),
+		},
+	}
+}
+
+// GetMethodInfo returns information about available methods
+func (h *JSONRPCHandler) GetMethodInfo() map[string]*MethodInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// Create a copy to avoid concurrent access issues
+	info := make(map[string]*MethodInfo, len(h.methodMap))
+	for k, v := range h.methodMap {
+		info[k] = v
+	}
+	return info
+}

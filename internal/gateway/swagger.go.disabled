@@ -1,0 +1,808 @@
+package gateway
+
+import (
+	"embed"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
+	"github.com/yhonda-ohishi/db-handler-server/internal/config"
+)
+
+//go:embed static/swagger-ui/*
+var swaggerUIFiles embed.FS
+
+// SwaggerHandler handles Swagger UI and OpenAPI spec serving
+type SwaggerHandler struct {
+	config   *config.Config
+	specData map[string]interface{}
+}
+
+// NewSwaggerHandler creates a new Swagger handler
+func NewSwaggerHandler(cfg *config.Config) (*SwaggerHandler, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	handler := &SwaggerHandler{
+		config:   cfg,
+		specData: make(map[string]interface{}),
+	}
+
+	// Generate OpenAPI spec
+	handler.generateOpenAPISpec()
+
+	return handler, nil
+}
+
+// RegisterRoutes registers Swagger routes with Fiber
+func (h *SwaggerHandler) RegisterRoutes(router fiber.Router) {
+	// Serve OpenAPI spec
+	router.Get("/openapi.json", h.serveOpenAPISpec)
+	router.Get("/openapi.yaml", h.serveOpenAPISpecYAML)
+
+	// Serve Swagger UI
+	router.Get("/", h.redirectToSwaggerUI)
+	router.Get("/index.html", h.serveSwaggerUI)
+
+	// Serve static Swagger UI files
+	router.Use("/", filesystem.New(filesystem.Config{
+		Root:       http.FS(swaggerUIFiles),
+		PathPrefix: "static/swagger-ui",
+		Browse:     false,
+		Index:      "index.html",
+	}))
+
+	slog.Info("Swagger UI routes registered")
+}
+
+// generateOpenAPISpec generates the OpenAPI specification
+func (h *SwaggerHandler) generateOpenAPISpec() {
+	h.specData = map[string]interface{}{
+		"openapi": "3.0.3",
+		"info": map[string]interface{}{
+			"title":       "ETC Meisai API",
+			"description": "API for ETC (Electronic Toll Collection) transaction management system",
+			"version":     "1.0.0",
+			"contact": map[string]interface{}{
+				"name":  "ETC Meisai Team",
+				"email": "support@etc-meisai.com",
+			},
+			"license": map[string]interface{}{
+				"name": "MIT",
+				"url":  "https://opensource.org/licenses/MIT",
+			},
+		},
+		"servers": []map[string]interface{}{
+			{
+				"url":         fmt.Sprintf("http://localhost:%d/api/v1", h.config.Server.HTTPPort),
+				"description": "Development server",
+			},
+		},
+		"paths": h.generatePaths(),
+		"components": map[string]interface{}{
+			"schemas":         h.generateSchemas(),
+			"securitySchemes": h.generateSecuritySchemes(),
+		},
+		"security": []map[string]interface{}{
+			{"bearerAuth": []string{}},
+		},
+		"tags": h.generateTags(),
+	}
+}
+
+// generatePaths generates OpenAPI paths for all services
+func (h *SwaggerHandler) generatePaths() map[string]interface{} {
+	paths := make(map[string]interface{})
+
+	// User Service paths
+	paths["/rest/users/{user_id}"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"User"},
+			"summary":     "Get user by ID",
+			"description": "Retrieve a specific user by their ID",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "user_id",
+					"in":          "path",
+					"required":    true,
+					"description": "User ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generateUserResponses(),
+		},
+	}
+
+	paths["/rest/users"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"User"},
+			"summary":     "List users",
+			"description": "Get a list of all users",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "page_size",
+					"in":          "query",
+					"description": "Number of users to return",
+					"schema":      map[string]string{"type": "integer", "default": "10"},
+				},
+				{
+					"name":        "page_token",
+					"in":          "query",
+					"description": "Token for pagination",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generateUsersListResponses(),
+		},
+		"post": map[string]interface{}{
+			"tags":        []string{"User"},
+			"summary":     "Create user",
+			"description": "Create a new user",
+			"requestBody": h.generateCreateUserRequestBody(),
+			"responses":   h.generateUserResponses(),
+		},
+	}
+
+	// Transaction Service paths
+	paths["/rest/transactions/{transaction_id}"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Transaction"},
+			"summary":     "Get transaction by ID",
+			"description": "Retrieve a specific transaction by its ID",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "transaction_id",
+					"in":          "path",
+					"required":    true,
+					"description": "Transaction ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generateTransactionResponses(),
+		},
+	}
+
+	paths["/rest/transactions/history"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Transaction"},
+			"summary":     "Get transaction history",
+			"description": "Get transaction history for a user",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "user_id",
+					"in":          "query",
+					"required":    true,
+					"description": "User ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+				{
+					"name":        "start_date",
+					"in":          "query",
+					"description": "Start date (YYYY-MM-DD)",
+					"schema":      map[string]string{"type": "string", "format": "date"},
+				},
+				{
+					"name":        "end_date",
+					"in":          "query",
+					"description": "End date (YYYY-MM-DD)",
+					"schema":      map[string]string{"type": "string", "format": "date"},
+				},
+			},
+			"responses": h.generateTransactionHistoryResponses(),
+		},
+	}
+
+	// Card Service paths
+	paths["/rest/cards/{card_id}"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Card"},
+			"summary":     "Get card by ID",
+			"description": "Retrieve a specific ETC card by its ID",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "card_id",
+					"in":          "path",
+					"required":    true,
+					"description": "Card ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generateCardResponses(),
+		},
+	}
+
+	paths["/rest/cards"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Card"},
+			"summary":     "List cards",
+			"description": "Get a list of ETC cards",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "user_id",
+					"in":          "query",
+					"description": "Filter by user ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generateCardsListResponses(),
+		},
+		"post": map[string]interface{}{
+			"tags":        []string{"Card"},
+			"summary":     "Create card",
+			"description": "Create a new ETC card",
+			"requestBody": h.generateCreateCardRequestBody(),
+			"responses":   h.generateCardResponses(),
+		},
+	}
+
+	// Payment Service paths
+	paths["/rest/payments/{payment_id}"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Payment"},
+			"summary":     "Get payment by ID",
+			"description": "Retrieve a specific payment by its ID",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "payment_id",
+					"in":          "path",
+					"required":    true,
+					"description": "Payment ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+			},
+			"responses": h.generatePaymentResponses(),
+		},
+	}
+
+	paths["/rest/payments"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Payment"},
+			"summary":     "List payments",
+			"description": "Get a list of payments",
+			"responses":   h.generatePaymentsListResponses(),
+		},
+		"post": map[string]interface{}{
+			"tags":        []string{"Payment"},
+			"summary":     "Create payment",
+			"description": "Create a new payment",
+			"requestBody": h.generateCreatePaymentRequestBody(),
+			"responses":   h.generatePaymentResponses(),
+		},
+	}
+
+	paths["/rest/payments/statement/{user_id}"] = map[string]interface{}{
+		"get": map[string]interface{}{
+			"tags":        []string{"Payment"},
+			"summary":     "Get monthly statement",
+			"description": "Get monthly statement for a user",
+			"parameters": []map[string]interface{}{
+				{
+					"name":        "user_id",
+					"in":          "path",
+					"required":    true,
+					"description": "User ID",
+					"schema":      map[string]string{"type": "string"},
+				},
+				{
+					"name":        "year",
+					"in":          "query",
+					"required":    true,
+					"description": "Year (YYYY)",
+					"schema":      map[string]string{"type": "integer"},
+				},
+				{
+					"name":        "month",
+					"in":          "query",
+					"required":    true,
+					"description": "Month (1-12)",
+					"schema":      map[string]string{"type": "integer", "minimum": "1", "maximum": "12"},
+				},
+			},
+			"responses": h.generateMonthlyStatementResponses(),
+		},
+	}
+
+	// JSON-RPC endpoint
+	paths["/jsonrpc"] = map[string]interface{}{
+		"post": map[string]interface{}{
+			"tags":        []string{"JSON-RPC"},
+			"summary":     "JSON-RPC 2.0 endpoint",
+			"description": "JSON-RPC 2.0 endpoint for all services",
+			"requestBody": h.generateJSONRPCRequestBody(),
+			"responses":   h.generateJSONRPCResponses(),
+		},
+	}
+
+	return paths
+}
+
+// generateSchemas generates OpenAPI schemas
+func (h *SwaggerHandler) generateSchemas() map[string]interface{} {
+	return map[string]interface{}{
+		"User": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"user_id":    map[string]string{"type": "string", "description": "Unique user identifier"},
+				"name":       map[string]string{"type": "string", "description": "User's full name"},
+				"email":      map[string]string{"type": "string", "format": "email", "description": "User's email address"},
+				"phone":      map[string]string{"type": "string", "description": "User's phone number"},
+				"created_at": map[string]string{"type": "string", "format": "date-time", "description": "Creation timestamp"},
+				"updated_at": map[string]string{"type": "string", "format": "date-time", "description": "Last update timestamp"},
+			},
+			"required": []string{"user_id", "name", "email"},
+		},
+		"Card": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"card_id":    map[string]string{"type": "string", "description": "Unique card identifier"},
+				"user_id":    map[string]string{"type": "string", "description": "Owner user ID"},
+				"card_number": map[string]string{"type": "string", "description": "ETC card number"},
+				"card_type":  map[string]string{"type": "string", "description": "Card type (personal, corporate)"},
+				"status":     map[string]string{"type": "string", "description": "Card status (active, inactive, suspended)"},
+				"issued_at":  map[string]string{"type": "string", "format": "date-time", "description": "Issue timestamp"},
+				"expires_at": map[string]string{"type": "string", "format": "date-time", "description": "Expiration timestamp"},
+			},
+			"required": []string{"card_id", "user_id", "card_number"},
+		},
+		"Transaction": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"transaction_id": map[string]string{"type": "string", "description": "Unique transaction identifier"},
+				"card_id":        map[string]string{"type": "string", "description": "ETC card ID used"},
+				"amount":         map[string]string{"type": "number", "format": "double", "description": "Transaction amount"},
+				"toll_road":      map[string]string{"type": "string", "description": "Toll road name"},
+				"entry_point":    map[string]string{"type": "string", "description": "Entry point name"},
+				"exit_point":     map[string]string{"type": "string", "description": "Exit point name"},
+				"transaction_time": map[string]string{"type": "string", "format": "date-time", "description": "Transaction timestamp"},
+				"vehicle_type":   map[string]string{"type": "string", "description": "Vehicle type classification"},
+			},
+			"required": []string{"transaction_id", "card_id", "amount"},
+		},
+		"Payment": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"payment_id":     map[string]string{"type": "string", "description": "Unique payment identifier"},
+				"user_id":        map[string]string{"type": "string", "description": "User ID"},
+				"amount":         map[string]string{"type": "number", "format": "double", "description": "Payment amount"},
+				"payment_method": map[string]string{"type": "string", "description": "Payment method (credit_card, bank_transfer)"},
+				"status":         map[string]string{"type": "string", "description": "Payment status"},
+				"payment_date":   map[string]string{"type": "string", "format": "date-time", "description": "Payment timestamp"},
+			},
+			"required": []string{"payment_id", "user_id", "amount"},
+		},
+		"Error": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"code":    map[string]string{"type": "integer", "description": "Error code"},
+				"message": map[string]string{"type": "string", "description": "Error message"},
+			},
+			"required": []string{"code", "message"},
+		},
+	}
+}
+
+// generateSecuritySchemes generates security schemes
+func (h *SwaggerHandler) generateSecuritySchemes() map[string]interface{} {
+	return map[string]interface{}{
+		"bearerAuth": map[string]interface{}{
+			"type":         "http",
+			"scheme":       "bearer",
+			"bearerFormat": "JWT",
+			"description":  "JWT token authentication",
+		},
+	}
+}
+
+// generateTags generates API tags
+func (h *SwaggerHandler) generateTags() []map[string]interface{} {
+	return []map[string]interface{}{
+		{
+			"name":        "User",
+			"description": "User management operations",
+		},
+		{
+			"name":        "Card",
+			"description": "ETC card management operations",
+		},
+		{
+			"name":        "Transaction",
+			"description": "ETC transaction operations",
+		},
+		{
+			"name":        "Payment",
+			"description": "Payment processing operations",
+		},
+		{
+			"name":        "JSON-RPC",
+			"description": "JSON-RPC 2.0 API endpoint",
+		},
+	}
+}
+
+// Response generators
+func (h *SwaggerHandler) generateUserResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]string{"$ref": "#/components/schemas/User"},
+				},
+			},
+		},
+		"404": map[string]interface{}{
+			"description": "User not found",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]string{"$ref": "#/components/schemas/Error"},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateUsersListResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"users": map[string]interface{}{
+								"type":  "array",
+								"items": map[string]string{"$ref": "#/components/schemas/User"},
+							},
+							"next_page_token": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateCreateUserRequestBody() map[string]interface{} {
+	return map[string]interface{}{
+		"required": true,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name":  map[string]string{"type": "string", "description": "User's full name"},
+						"email": map[string]string{"type": "string", "format": "email", "description": "User's email"},
+						"phone": map[string]string{"type": "string", "description": "User's phone number"},
+					},
+					"required": []string{"name", "email"},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateTransactionResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]string{"$ref": "#/components/schemas/Transaction"},
+				},
+			},
+		},
+		"404": map[string]interface{}{
+			"description": "Transaction not found",
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateTransactionHistoryResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"transactions": map[string]interface{}{
+								"type":  "array",
+								"items": map[string]string{"$ref": "#/components/schemas/Transaction"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateCardResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]string{"$ref": "#/components/schemas/Card"},
+				},
+			},
+		},
+		"404": map[string]interface{}{
+			"description": "Card not found",
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateCardsListResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"cards": map[string]interface{}{
+								"type":  "array",
+								"items": map[string]string{"$ref": "#/components/schemas/Card"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateCreateCardRequestBody() map[string]interface{} {
+	return map[string]interface{}{
+		"required": true,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"user_id":     map[string]string{"type": "string", "description": "Owner user ID"},
+						"card_number": map[string]string{"type": "string", "description": "ETC card number"},
+						"card_type":   map[string]string{"type": "string", "description": "Card type"},
+					},
+					"required": []string{"user_id", "card_number"},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generatePaymentResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]string{"$ref": "#/components/schemas/Payment"},
+				},
+			},
+		},
+		"404": map[string]interface{}{
+			"description": "Payment not found",
+		},
+	}
+}
+
+func (h *SwaggerHandler) generatePaymentsListResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"payments": map[string]interface{}{
+								"type":  "array",
+								"items": map[string]string{"$ref": "#/components/schemas/Payment"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateCreatePaymentRequestBody() map[string]interface{} {
+	return map[string]interface{}{
+		"required": true,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"user_id":        map[string]string{"type": "string", "description": "User ID"},
+						"amount":         map[string]string{"type": "number", "format": "double", "description": "Payment amount"},
+						"payment_method": map[string]string{"type": "string", "description": "Payment method"},
+					},
+					"required": []string{"user_id", "amount", "payment_method"},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateMonthlyStatementResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "Successful response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"user_id":      map[string]string{"type": "string"},
+							"year":         map[string]string{"type": "integer"},
+							"month":        map[string]string{"type": "integer"},
+							"total_amount": map[string]string{"type": "number", "format": "double"},
+							"transactions": map[string]interface{}{
+								"type":  "array",
+								"items": map[string]string{"$ref": "#/components/schemas/Transaction"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateJSONRPCRequestBody() map[string]interface{} {
+	return map[string]interface{}{
+		"required": true,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"jsonrpc": map[string]string{"type": "string", "enum": "2.0", "description": "JSON-RPC version"},
+						"method":  map[string]string{"type": "string", "description": "Method name (e.g., 'user.get')"},
+						"params":  map[string]string{"type": "object", "description": "Method parameters"},
+						"id":      map[string]string{"type": "string", "description": "Request ID"},
+					},
+					"required": []string{"jsonrpc", "method"},
+				},
+			},
+		},
+	}
+}
+
+func (h *SwaggerHandler) generateJSONRPCResponses() map[string]interface{} {
+	return map[string]interface{}{
+		"200": map[string]interface{}{
+			"description": "JSON-RPC response",
+			"content": map[string]interface{}{
+				"application/json": map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"jsonrpc": map[string]string{"type": "string", "enum": "2.0"},
+							"result":  map[string]string{"type": "object", "description": "Success result"},
+							"error": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"code":    map[string]string{"type": "integer"},
+									"message": map[string]string{"type": "string"},
+									"data":    map[string]string{"type": "object"},
+								},
+							},
+							"id": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// serveOpenAPISpec serves the OpenAPI specification as JSON
+func (h *SwaggerHandler) serveOpenAPISpec(c *fiber.Ctx) error {
+	return c.JSON(h.specData)
+}
+
+// serveOpenAPISpecYAML serves the OpenAPI specification as YAML (simplified)
+func (h *SwaggerHandler) serveOpenAPISpecYAML(c *fiber.Ctx) error {
+	c.Set("Content-Type", "application/yaml")
+	// For simplicity, we'll return a message that JSON is available
+	// In a real implementation, you'd convert the spec to YAML format
+	yamlResponse := `# OpenAPI Specification
+# For the full specification, please see /docs/openapi.json
+openapi: 3.0.3
+info:
+  title: ETC Meisai API
+  version: 1.0.0
+  description: "Full specification available at /docs/openapi.json"
+`
+	return c.SendString(yamlResponse)
+}
+
+// redirectToSwaggerUI redirects to the Swagger UI
+func (h *SwaggerHandler) redirectToSwaggerUI(c *fiber.Ctx) error {
+	return c.Redirect("/docs/index.html")
+}
+
+// serveSwaggerUI serves the Swagger UI HTML page
+func (h *SwaggerHandler) serveSwaggerUI(c *fiber.Ctx) error {
+	specURL := fmt.Sprintf("/docs/openapi.json")
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ETC Meisai API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="./swagger-ui-bundle.css" />
+    <link rel="stylesheet" type="text/css" href="./swagger-ui.css" />
+    <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
+    <link rel="icon" type="image/png" href="./favicon-16x16.png" sizes="16x16" />
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="./swagger-ui-bundle.js" charset="UTF-8"></script>
+    <script src="./swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: '%s',
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: "StandaloneLayout",
+                validatorUrl: null,
+                tryItOutEnabled: true,
+                supportedSubmitMethods: ['get', 'post', 'put', 'delete', 'patch'],
+                onComplete: function() {
+                    console.log('Swagger UI loaded');
+                },
+                onFailure: function(data) {
+                    console.error('Failed to load Swagger UI', data);
+                }
+            });
+        };
+    </script>
+</body>
+</html>`, specURL)
+
+	c.Set("Content-Type", "text/html")
+	return c.SendString(html)
+}
+
+// HealthCheck performs a health check on the Swagger handler
+func (h *SwaggerHandler) HealthCheck() map[string]interface{} {
+	return map[string]interface{}{
+		"swagger": map[string]interface{}{
+			"status":    "healthy",
+			"spec_size": len(h.specData),
+			"version":   "3.0.3",
+		},
+	}
+}
+
+// GetOpenAPISpec returns the OpenAPI specification
+func (h *SwaggerHandler) GetOpenAPISpec() map[string]interface{} {
+	return h.specData
+}
+
+// UpdateOpenAPISpec allows updating the OpenAPI specification
+func (h *SwaggerHandler) UpdateOpenAPISpec(spec map[string]interface{}) {
+	h.specData = spec
+}
