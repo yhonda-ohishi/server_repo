@@ -1,14 +1,16 @@
 package services
 
 import (
+	"database/sql"
 	"log"
+	"os"
 
 	pb "github.com/yhonda-ohishi/db-handler-server/proto"
 	"github.com/yhonda-ohishi/db-handler-server/internal/client"
-	"github.com/yhonda-ohishi/db_service/src/config"
 	dbproto "github.com/yhonda-ohishi/db_service/src/proto"
-	"github.com/yhonda-ohishi/db_service/src/repository"
-	"github.com/yhonda-ohishi/db_service/src/service"
+	etcpb "github.com/yhonda-ohishi/etc_meisai_scraper/src/pb"
+	etcservices "github.com/yhonda-ohishi/etc_meisai_scraper/src/services"
+	_ "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
 )
 
@@ -25,6 +27,8 @@ type ServiceRegistry struct {
 	DTakoUriageKeihiService dbproto.DTakoUriageKeihiServiceServer
 	DTakoFerryRowsService   dbproto.DTakoFerryRowsServiceServer
 	ETCMeisaiMappingService dbproto.ETCMeisaiMappingServiceServer
+	// etc_meisai_scraper services
+	DownloadService         etcpb.DownloadServiceServer
 	IsSingleMode            bool
 }
 
@@ -58,45 +62,35 @@ func NewServiceRegistryForSingleMode() *ServiceRegistry {
 	}
 }
 
-// NewServiceRegistryWithRealDB creates a service registry with real db_service implementations
+// NewServiceRegistryWithRealDB creates a service registry with db_service client
 func NewServiceRegistryWithRealDB() *ServiceRegistry {
-	// Load db_service configuration
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		log.Printf("Failed to load db_service config: %v", err)
-		return nil
+	// db_service is accessed via gRPC/bufconn, not direct database connection
+	// The db_service handles all database operations
+
+	// Initialize download service for etc_meisai_scraper
+	// For now, using a dummy DB connection - in production this would be configured properly
+	var downloadServiceServer etcpb.DownloadServiceServer
+
+	// Try to create the download service
+	if dbDSN := os.Getenv("DATABASE_URL"); dbDSN != "" {
+		if db, err := sql.Open("mysql", dbDSN); err == nil {
+			logger := log.New(os.Stdout, "[DownloadService] ", log.LstdFlags)
+			downloadServiceServer = etcservices.NewDownloadServiceGRPC(db, logger)
+		}
 	}
 
-	// Initialize database using db_service's config
-	db, err := config.InitDatabase(cfg)
-	if err != nil {
-		log.Printf("Failed to initialize db_service database: %v", err)
-		return nil
+	// If no DB configured, create without download service
+	if downloadServiceServer == nil {
+		log.Println("Warning: DownloadService not initialized (no DATABASE_URL)")
 	}
 
-	// Initialize repositories
-	etcMeisaiRepo := repository.NewETCMeisaiRepository(db)
-	dtakoUriageKeihiRepo := repository.NewDTakoUriageKeihiRepository(db)
-	dtakoFerryRowsRepo := repository.NewDTakoFerryRowsRepository(db)
-	etcMeisaiMappingRepo := repository.NewETCMeisaiMappingRepository(db)
-
-	// Initialize services
-	etcMeisaiService := service.NewETCMeisaiService(etcMeisaiRepo)
-	dtakoUriageKeihiService := service.NewDTakoUriageKeihiService(dtakoUriageKeihiRepo)
-	dtakoFerryRowsService := service.NewDTakoFerryRowsService(dtakoFerryRowsRepo)
-	etcMeisaiMappingService := service.NewETCMeisaiMappingService(etcMeisaiMappingRepo)
-
-	// Store real services
 	return &ServiceRegistry{
 		UserService:             NewUserService(),
 		TransactionService:      NewTransactionService(),
 		CardService:             NewCardService(),
 		PaymentService:          NewPaymentService(),
 		ETCService:              NewETCServiceServer(),
-		ETCMeisaiService:        etcMeisaiService,
-		DTakoUriageKeihiService: dtakoUriageKeihiService,
-		DTakoFerryRowsService:   dtakoFerryRowsService,
-		ETCMeisaiMappingService: etcMeisaiMappingService,
+		DownloadService:         downloadServiceServer,
 		IsSingleMode:            true,
 	}
 }
@@ -125,6 +119,11 @@ func (r *ServiceRegistry) RegisterAll(server *grpc.Server) {
 		}
 		if r.ETCMeisaiMappingService != nil {
 			dbproto.RegisterETCMeisaiMappingServiceServer(server, r.ETCMeisaiMappingService)
+		}
+
+		// Register etc_meisai_scraper services
+		if r.DownloadService != nil {
+			etcpb.RegisterDownloadServiceServer(server, r.DownloadService)
 		}
 	}
 }

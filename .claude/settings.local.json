@@ -21,7 +21,10 @@
       "Bash(curl:*)",
       "Bash(protoc:*)",
       "Read(//c/go/db_service/src/service/**)",
-      "Read(//c/go/db_service/**)"
+      "Read(//c/go/db_service/**)",
+      "Read(//c/go/etc_meisai_scraper/src/services/**)",
+      "Read(//c/go/etc_meisai_scraper/src/handlers/**)",
+      "Read(//c/go/etc_meisai_scraper/src/**)"
     ],
     "deny": [],
     "ask": []

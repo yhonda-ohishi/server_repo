@@ -5,8 +5,6 @@ import (
 	"github.com/yhonda-ohishi/db_service/src/service"
 	// "github.com/yhonda-ohishi/db_service/src/repository"
 	"google.golang.org/grpc"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
 )
 
 // DBProxyService wraps db_service implementations
@@ -15,7 +13,6 @@ type DBProxyService struct {
 	DTakoUriageKeihiService *service.DTakoUriageKeihiService
 	DTakoFerryRowsService   *service.DTakoFerryRowsService
 	ETCMeisaiMappingService *service.ETCMeisaiMappingService
-	db                      *gorm.DB
 }
 
 // NewDBProxyService creates a new DB proxy service
@@ -32,29 +29,17 @@ func NewDBProxyService(useMockData bool) *DBProxyService {
 	return &DBProxyService{}
 }
 
-// NewDBProxyServiceWithDB creates services with actual database connection
+// NewDBProxyServiceWithDB creates services - db_service handles all DB connections via gRPC
 func NewDBProxyServiceWithDB(dsn string) (*DBProxyService, error) {
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
-	if err != nil {
-		return nil, err
-	}
-
-	// Would need to import repository package and create real repositories here
-	// For now, return empty proxy
-	return &DBProxyService{
-		db: db,
-	}, nil
+	// db_service handles all database operations via gRPC
+	// No direct database connection needed here
+	return &DBProxyService{}, nil
 }
 
-// Close closes database connection if exists
+// Close closes any resources
 func (s *DBProxyService) Close() error {
-	if s.db != nil {
-		sqlDB, err := s.db.DB()
-		if err != nil {
-			return err
-		}
-		return sqlDB.Close()
-	}
+	// No direct database connections to close
+	// db_service manages its own connections
 	return nil
 }
 

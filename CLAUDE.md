@@ -1,7 +1,7 @@
 # Claude Code Context - gRPC-First Gateway Server
 
 ## Project Overview
-This is a gRPC-First Multi-Protocol Gateway server that automatically converts gRPC services to REST, gRPC-Web, and JSON-RPC2. It implements the etc_meisai (Japanese ETC toll system) API endpoints.
+This is a gRPC-First Multi-Protocol Gateway server that automatically converts gRPC services to REST, gRPC-Web, and JSON-RPC2. It implements the etc_meisai_scraper (Japanese ETC toll system scraper) API endpoints.
 
 ## Architecture
 - **gRPC-First**: All services defined in Protocol Buffers

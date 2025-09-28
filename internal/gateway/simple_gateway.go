@@ -96,6 +96,10 @@ func (g *SimpleGateway) startSingleMode(ctx context.Context) error {
 	dbRoutes := NewDBServiceRoutes(conn)
 	dbRoutes.RegisterRoutes(g.app)
 
+	// Setup download service REST routes
+	downloadRoutes := NewDownloadServiceRoutes(conn)
+	downloadRoutes.RegisterRoutes(g.app)
+
 	// Setup Swagger UI
 	g.SetupSwaggerUI()
 
