@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"path/filepath"
 
 	"github.com/gofiber/fiber/v2"
@@ -34,31 +35,86 @@ type SwaggerServer struct {
 func (g *SimpleGateway) SetupSwaggerUI() {
 	// Serve auto-generated swagger spec JSON from protobuf
 	g.app.Get("/swagger.json", func(c *fiber.Ctx) error {
+		// Create merged swagger spec
+		mergedSwagger := map[string]interface{}{
+			"swagger": "2.0",
+			"info": map[string]interface{}{
+				"title":       "ETC Meisai Gateway API",
+				"description": "Combined API documentation for all services",
+				"version":     "1.0.0",
+			},
+			"schemes": []string{"http", "https"},
+			"consumes": []string{"application/json"},
+			"produces": []string{"application/json"},
+			"paths": make(map[string]interface{}),
+			"definitions": make(map[string]interface{}),
+		}
+
 		// Try to read db_service swagger file
 		dbServiceSwaggerPath := filepath.Join("..", "db_service", "swagger", "apidocs.swagger.json")
-		var dbServiceSwagger map[string]interface{}
-
 		if data, err := ioutil.ReadFile(dbServiceSwaggerPath); err == nil {
+			var dbServiceSwagger map[string]interface{}
 			if err := json.Unmarshal(data, &dbServiceSwagger); err == nil {
 				log.Printf("Successfully loaded db_service swagger")
-				// Return db_service swagger directly
-				return c.JSON(dbServiceSwagger)
+				// Merge paths and definitions
+				if paths, ok := dbServiceSwagger["paths"].(map[string]interface{}); ok {
+					for k, v := range paths {
+						mergedSwagger["paths"].(map[string]interface{})[k] = v
+					}
+				}
+				if defs, ok := dbServiceSwagger["definitions"].(map[string]interface{}); ok {
+					for k, v := range defs {
+						mergedSwagger["definitions"].(map[string]interface{})[k] = v
+					}
+				}
 			}
 		}
 
-		// Try to read the auto-generated swagger file first
-		swaggerPath := filepath.Join("swagger", "etc_service.swagger.json")
-		if data, err := ioutil.ReadFile(swaggerPath); err == nil {
-			var swaggerData interface{}
-			if err := json.Unmarshal(data, &swaggerData); err == nil {
-				return c.JSON(swaggerData)
+		// Try to fetch etc_meisai_scraper swagger from GitHub
+		etcMeisaiSwaggerURL := "https://raw.githubusercontent.com/yhonda-ohishi/etc_meisai_scraper/master/swagger/etc_meisai.swagger.json"
+		if resp, err := http.Get(etcMeisaiSwaggerURL); err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			if data, err := ioutil.ReadAll(resp.Body); err == nil {
+				var etcMeisaiSwagger map[string]interface{}
+				if err := json.Unmarshal(data, &etcMeisaiSwagger); err == nil {
+					log.Printf("Successfully loaded etc_meisai_scraper swagger from GitHub")
+					// Merge paths and definitions
+					if paths, ok := etcMeisaiSwagger["paths"].(map[string]interface{}); ok {
+						for k, v := range paths {
+							mergedSwagger["paths"].(map[string]interface{})[k] = v
+						}
+					}
+					if defs, ok := etcMeisaiSwagger["definitions"].(map[string]interface{}); ok {
+						for k, v := range defs {
+							mergedSwagger["definitions"].(map[string]interface{})[k] = v
+						}
+					}
+				}
+			}
+		} else {
+			// Fallback to local file if GitHub fetch fails
+			etcMeisaiSwaggerPath := filepath.Join("..", "etc_meisai_scraper", "swagger", "etc_meisai.swagger.json")
+			if data, err := ioutil.ReadFile(etcMeisaiSwaggerPath); err == nil {
+				var etcMeisaiSwagger map[string]interface{}
+				if err := json.Unmarshal(data, &etcMeisaiSwagger); err == nil {
+					log.Printf("Successfully loaded etc_meisai_scraper swagger from local file")
+					// Merge paths and definitions
+					if paths, ok := etcMeisaiSwagger["paths"].(map[string]interface{}); ok {
+						for k, v := range paths {
+							mergedSwagger["paths"].(map[string]interface{})[k] = v
+						}
+					}
+					if defs, ok := etcMeisaiSwagger["definitions"].(map[string]interface{}); ok {
+						for k, v := range defs {
+							mergedSwagger["definitions"].(map[string]interface{})[k] = v
+						}
+					}
+				}
 			}
 		}
 
-		// Fallback to manual swagger spec if auto-generated file is not available
-		log.Printf("Auto-generated swagger file not found, falling back to manual spec")
-		spec := g.generateSwaggerSpec()
-		return c.JSON(spec)
+		// Return merged swagger
+		return c.JSON(mergedSwagger)
 	})
 
 	// Serve Swagger UI
